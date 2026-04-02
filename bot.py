@@ -2,178 +2,194 @@ import asyncio
 import logging
 import sqlite3
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    FSInputFile
+)
 from aiogram.filters import Command
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ⚠️ ВАЖНО: токен больше НЕ хранится в коде
-# Используй переменную окружения API_TOKEN
+# ---------------- CONFIG ----------------
 API_TOKEN = os.getenv("API_TOKEN")
-
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
-scheduler = AsyncIOScheduler()
 
-# ---------------- DATABASE ----------------
+# ---------------- DB ----------------
 conn = sqlite3.connect("bot.db")
 cursor = conn.cursor()
 
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS students (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE,
-    user_id INTEGER
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    name TEXT,
+    role TEXT DEFAULT 'student'
 )
 """)
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS lessons (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_name TEXT,
     student_id INTEGER,
-    datetime TEXT,
-    repeat_weekly INTEGER DEFAULT 0
+    datetime TEXT
 )
 """)
 
 conn.commit()
 
-# ---------------- UI ----------------
-main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="➕ Добавить занятие")],
-        [KeyboardButton(text="📋 Ученики"), KeyboardButton(text="📅 Занятия")]
-    ],
-    resize_keyboard=True
-)
+# ---------------- ADMIN LIST ----------------
+ADMIN_IDS = {742677653}  # сюда добавь свой ID вручную при первом запуске
 
-user_state = {}
+def is_admin(user_id: int):
+    cursor.execute("SELECT role FROM users WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    return user_id in ADMIN_IDS or (row and row[0] == "admin")
+
+# ---------------- KEYBOARDS ----------------
+def admin_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить занятие", callback_data="add_lesson")],
+        [InlineKeyboardButton(text="📅 Все занятия", callback_data="all_lessons")],
+        [InlineKeyboardButton(text="👨‍🎓 Ученики", callback_data="students")],
+        [InlineKeyboardButton(text="📥 Скачать код", callback_data="download_code")]
+    ])
+
+def student_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Мои занятия", callback_data="my_lessons")]
+    ])
+
+def time_kb():
+    times = [f"{h:02d}:00" for h in range(8, 22)]
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t, callback_data=f"time_{t}")]
+        for t in times
+    ])
+
+def date_kb():
+    today = date.today()
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=str(today), callback_data=f"date_{today}")],
+        [InlineKeyboardButton(text=str(today + timedelta(days=1)), callback_data=f"date_{today + timedelta(days=1)}")],
+        [InlineKeyboardButton(text=str(today + timedelta(days=2)), callback_data=f"date_{today + timedelta(days=2)}")]
+    ])
 
 # ---------------- START ----------------
 @dp.message(Command("start"))
 async def start(message: Message):
-    await message.answer("Привет! Напиши своё имя для регистрации 👇", reply_markup=main_kb)
-
-# ---------------- REGISTER ----------------
-@dp.message(F.text)
-async def register_or_handle(message: Message):
     user_id = message.from_user.id
-    text = message.text
 
-    # регистрация
-    cursor.execute("SELECT * FROM students WHERE user_id=?", (user_id,))
-    if not cursor.fetchone() and text not in ["➕ Добавить занятие", "📋 Ученики", "📅 Занятия"]:
-        cursor.execute("INSERT OR IGNORE INTO students (name, user_id) VALUES (?, ?)", (text, user_id))
-        conn.commit()
-        await message.answer(f"Ты зарегистрирован как {text} ✅")
-        return
-
-    # список учеников
-    if text == "📋 Ученики":
-        cursor.execute("SELECT name FROM students")
-        data = cursor.fetchall()
-        await message.answer("Ученики:\n" + "\n".join([i[0] for i in data]) if data else "Нет учеников")
-        return
-
-    # список занятий
-    if text == "📅 Занятия":
-        cursor.execute("SELECT id, student_name, datetime FROM lessons")
-        data = cursor.fetchall()
-
-        if not data:
-            await message.answer("Нет занятий")
-            return
-
-        for i in data:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{i[0]}")]
-            ])
-            await message.answer(f"{i[1]} | {i[2]}", reply_markup=kb)
-        return
-
-    # добавление занятия
-    if text == "➕ Добавить занятие":
-        cursor.execute("SELECT name FROM students")
-        students = cursor.fetchall()
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=s[0], callback_data=f"student_{s[0]}")] for s in students
-        ])
-
-        await message.answer("Выбери ученика 👇", reply_markup=kb)
-        return
-
-    # ввод даты
-    if user_id in user_state:
-        try:
-            lesson_time = datetime.strptime(text, "%Y-%m-%d %H:%M")
-            student_name = user_state[user_id]
-
-            cursor.execute("SELECT user_id FROM students WHERE name=?", (student_name,))
-            student = cursor.fetchone()
-
-            if not student:
-                await message.answer("Ошибка: ученик не найден")
-                return
-
-            student_id = student[0]
-
-            cursor.execute(
-                "INSERT INTO lessons (student_name, student_id, datetime) VALUES (?, ?, ?)",
-                (student_name, student_id, lesson_time.isoformat())
-            )
-            conn.commit()
-
-            schedule_reminders(student_name, student_id, lesson_time)
-
-            await message.answer("Занятие добавлено ✅")
-            del user_state[user_id]
-
-        except Exception:
-            await message.answer("Формат: YYYY-MM-DD HH:MM")
-
-# ---------------- CALLBACKS ----------------
-@dp.callback_query(F.data.startswith("student_"))
-async def choose_student(call: CallbackQuery):
-    name = call.data.split("_")[1]
-    user_state[call.from_user.id] = name
-    await call.message.answer("Введи дату и время (YYYY-MM-DD HH:MM)")
-
-@dp.callback_query(F.data.startswith("del_"))
-async def delete(call: CallbackQuery):
-    lesson_id = call.data.split("_")[1]
-    cursor.execute("DELETE FROM lessons WHERE id=?", (lesson_id,))
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, name) VALUES (?, ?)",
+                   (user_id, message.from_user.first_name))
     conn.commit()
-    await call.message.edit_text("Удалено ❌")
 
-# ---------------- REMINDERS ----------------
-def schedule_reminders(name, student_id, lesson_time):
-    scheduler.add_job(send_24h, "date", run_date=lesson_time - timedelta(hours=24), args=[name, student_id, lesson_time])
-    scheduler.add_job(send_2h, "date", run_date=lesson_time - timedelta(hours=2), args=[name, student_id, lesson_time])
+    if is_admin(user_id):
+        await message.answer("👑 Админ панель", reply_markup=admin_kb())
+    else:
+        await message.answer("👨‍🎓 Кабинет ученика", reply_markup=student_kb())
 
-async def send_24h(name, student_id, lesson_time):
-    await bot.send_message(student_id, f"📅 Завтра занятие в {lesson_time.strftime('%H:%M')}")
+# ---------------- STUDENT VIEW ----------------
+@dp.callback_query(F.data == "my_lessons")
+async def my_lessons(call: CallbackQuery):
+    user_id = call.from_user.id
 
-async def send_2h(name, student_id, lesson_time):
-    await bot.send_message(student_id, f"⏰ Через 2 часа занятие в {lesson_time.strftime('%H:%M')}")
+    cursor.execute("SELECT datetime FROM lessons WHERE student_id=?", (user_id,))
+    lessons = cursor.fetchall()
+
+    if not lessons:
+        await call.message.answer("📭 Нет занятий")
+        return
+
+    text = "📅 Твои занятия:\n\n"
+    for l in lessons:
+        text += f"• {l[0]}\n"
+
+    await call.message.answer(text)
+
+# ---------------- ADD LESSON FLOW ----------------
+temp = {}
+
+@dp.callback_query(F.data == "add_lesson")
+async def add_lesson(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return
+
+    cursor.execute("SELECT user_id, name FROM users WHERE role='student'")
+    students = cursor.fetchall()
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=name, callback_data=f"student_{uid}")]
+        for uid, name in students
+    ])
+
+    await call.message.answer("👨‍🎓 Выбери ученика:", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("student_"))
+async def pick_student(call: CallbackQuery):
+    student_id = int(call.data.split("_")[1])
+    temp[call.from_user.id] = {"student_id": student_id}
+
+    await call.message.answer("📅 Выбери дату:", reply_markup=date_kb())
+
+@dp.callback_query(F.data.startswith("date_"))
+async def pick_date(call: CallbackQuery):
+    d = call.data.replace("date_", "")
+    temp[call.from_user.id]["date"] = d
+
+    await call.message.answer("⏰ Выбери время:", reply_markup=time_kb())
+
+@dp.callback_query(F.data.startswith("time_"))
+async def pick_time(call: CallbackQuery):
+    t = call.data.replace("time_", "")
+    data = temp.get(call.from_user.id)
+
+    if not data:
+        await call.message.answer("Ошибка")
+        return
+
+    dt = f"{data['date']} {t}"
+
+    cursor.execute(
+        "INSERT INTO lessons (student_id, datetime) VALUES (?, ?)",
+        (data["student_id"], dt)
+    )
+    conn.commit()
+
+    await call.message.answer(f"✅ Создано занятие: {dt}")
+
+
+# ---------------- REMINDER SYSTEM ----------------
+async def reminder_loop():
+    while True:
+        now = datetime.now()
+
+        cursor.execute("SELECT student_id, datetime FROM lessons")
+        lessons = cursor.fetchall()
+
+        for student_id, dt in lessons:
+            try:
+                lesson_time = datetime.strptime(dt, "%Y-%m-%d %H:%M")
+
+                # за 2 часа
+                if lesson_time - timedelta(hours=2) <= now < lesson_time - timedelta(hours=1, minutes=59):
+                    await bot.send_message(student_id, "⏰ Через 2 часа занятие")
+
+
+            except:
+                pass
+
+        await asyncio.sleep(60)
 
 # ---------------- MAIN ----------------
 async def main():
-    if not API_TOKEN:
-        print("❌ Нет API_TOKEN в переменных окружения")
-        return
-
-    scheduler.start()
+    asyncio.create_task(reminder_loop())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-# ⚠️ ВАЖНО
-# Ты случайно слил токен бота. Обязательно зайди в @BotFather и сделай /revoke, затем создай новый.
-# Иначе бот могут украсть.
