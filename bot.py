@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS lessons (
 conn.commit()
 
 # ---------------- ADMINS ----------------
-ADMIN_IDS = set()
+ADMIN_IDS = 742677653
 
 def is_admin(user_id: int):
     cursor.execute("SELECT role FROM users WHERE user_id=?", (user_id,))
@@ -76,6 +76,11 @@ def date_kb():
         [InlineKeyboardButton(text=str(today), callback_data=f"date_{today}")],
         [InlineKeyboardButton(text=str(today + timedelta(days=1)), callback_data=f"date_{today + timedelta(days=1)}")],
         [InlineKeyboardButton(text=str(today + timedelta(days=2)), callback_data=f"date_{today + timedelta(days=2)}")],
+        [InlineKeyboardButton(text=str(today + timedelta(days=3)), callback_data=f"date_{today + timedelta(days=3)}")],
+        [InlineKeyboardButton(text=str(today + timedelta(days=4)), callback_data=f"date_{today + timedelta(days=4)}")],
+        [InlineKeyboardButton(text=str(today + timedelta(days=5)), callback_data=f"date_{today + timedelta(days=5)}")],
+        [InlineKeyboardButton(text=str(today + timedelta(days=6)), callback_data=f"date_{today + timedelta(days=6)}")],
+        [InlineKeyboardButton(text=str(today + timedelta(days=7)), callback_data=f"date_{today + timedelta(days=7)}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
     ])
 
