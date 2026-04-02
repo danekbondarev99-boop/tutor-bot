@@ -14,6 +14,7 @@ from aiogram.filters import Command
 
 # ---------------- CONFIG ----------------
 API_TOKEN = os.getenv("API_TOKEN")
+
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=API_TOKEN)
@@ -41,26 +42,41 @@ CREATE TABLE IF NOT EXISTS lessons (
 
 conn.commit()
 
-# ---------------- ADMIN LIST ----------------
-ADMIN_IDS = {742677653}  # сюда добавь свой ID вручную при первом запуске
+# ---------------- ADMINS ----------------
+ADMIN_IDS = set()
 
 def is_admin(user_id: int):
     cursor.execute("SELECT role FROM users WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
     return user_id in ADMIN_IDS or (row and row[0] == "admin")
 
-# ---------------- KEYBOARDS ----------------
-def admin_kb():
+# ---------------- NAVIGATION ----------------
+def back_btn():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить занятие", callback_data="add_lesson")],
-        [InlineKeyboardButton(text="📅 Все занятия", callback_data="all_lessons")],
-        [InlineKeyboardButton(text="👨‍🎓 Ученики", callback_data="students")],
-        [InlineKeyboardButton(text="📥 Скачать код", callback_data="download_code")]
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
     ])
 
-def student_kb():
+def main_menu(user_id: int):
+    if is_admin(user_id):
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Добавить занятие", callback_data="add_lesson")],
+            [InlineKeyboardButton(text="📅 Все занятия", callback_data="all_lessons")],
+            [InlineKeyboardButton(text="👨‍🎓 Ученики", callback_data="students")]
+        ])
+    else:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📅 Мои занятия", callback_data="my_lessons")]
+        ])
+
+# ---------------- TIME / DATE ----------------
+def date_kb():
+    today = date.today()
+
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📅 Мои занятия", callback_data="my_lessons")]
+        [InlineKeyboardButton(text=str(today), callback_data=f"date_{today}")],
+        [InlineKeyboardButton(text=str(today + timedelta(days=1)), callback_data=f"date_{today + timedelta(days=1)}")],
+        [InlineKeyboardButton(text=str(today + timedelta(days=2)), callback_data=f"date_{today + timedelta(days=2)}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
     ])
 
 def time_kb():
@@ -69,30 +85,34 @@ def time_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t, callback_data=f"time_{t}")]
         for t in times
-    ])
+    ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back")]])
 
-def date_kb():
-    today = date.today()
-
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=str(today), callback_data=f"date_{today}")],
-        [InlineKeyboardButton(text=str(today + timedelta(days=1)), callback_data=f"date_{today + timedelta(days=1)}")],
-        [InlineKeyboardButton(text=str(today + timedelta(days=2)), callback_data=f"date_{today + timedelta(days=2)}")]
-    ])
+# ---------------- TEMP STATE ----------------
+temp = {}
 
 # ---------------- START ----------------
 @dp.message(Command("start"))
 async def start(message: Message):
     user_id = message.from_user.id
 
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, name) VALUES (?, ?)",
-                   (user_id, message.from_user.first_name))
+    cursor.execute(
+        "INSERT OR IGNORE INTO users (user_id, name) VALUES (?, ?)",
+        (user_id, message.from_user.first_name)
+    )
     conn.commit()
 
-    if is_admin(user_id):
-        await message.answer("👑 Админ панель", reply_markup=admin_kb())
-    else:
-        await message.answer("👨‍🎓 Кабинет ученика", reply_markup=student_kb())
+    await message.answer(
+        "📊 CRM система\nВыберите действие:",
+        reply_markup=main_menu(user_id)
+    )
+
+# ---------------- BACK ----------------
+@dp.callback_query(F.data == "back")
+async def back(call: CallbackQuery):
+    await call.message.answer(
+        "📊 Главное меню",
+        reply_markup=main_menu(call.from_user.id)
+    )
 
 # ---------------- STUDENT VIEW ----------------
 @dp.callback_query(F.data == "my_lessons")
@@ -103,18 +123,41 @@ async def my_lessons(call: CallbackQuery):
     lessons = cursor.fetchall()
 
     if not lessons:
-        await call.message.answer("📭 Нет занятий")
+        await call.message.answer("📭 Нет занятий", reply_markup=back_btn())
         return
 
     text = "📅 Твои занятия:\n\n"
     for l in lessons:
         text += f"• {l[0]}\n"
 
-    await call.message.answer(text)
+    await call.message.answer(text, reply_markup=back_btn())
 
-# ---------------- ADD LESSON FLOW ----------------
-temp = {}
+# ---------------- ADMIN: ALL LESSONS ----------------
+@dp.callback_query(F.data == "all_lessons")
+async def all_lessons(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return
 
+    cursor.execute("""
+        SELECT users.name, lessons.datetime
+        FROM lessons
+        LEFT JOIN users ON users.user_id = lessons.student_id
+        ORDER BY lessons.datetime
+    """)
+
+    data = cursor.fetchall()
+
+    if not data:
+        await call.message.answer("📭 Нет занятий", reply_markup=back_btn())
+        return
+
+    text = "📅 Все занятия:\n\n"
+    for name, dt in data:
+        text += f"👤 {name} — {dt}\n"
+
+    await call.message.answer(text, reply_markup=back_btn())
+
+# ---------------- ADMIN: ADD LESSON ----------------
 @dp.callback_query(F.data == "add_lesson")
 async def add_lesson(call: CallbackQuery):
     if not is_admin(call.from_user.id):
@@ -126,7 +169,7 @@ async def add_lesson(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=name, callback_data=f"student_{uid}")]
         for uid, name in students
-    ])
+    ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back")]])
 
     await call.message.answer("👨‍🎓 Выбери ученика:", reply_markup=kb)
 
@@ -150,7 +193,7 @@ async def pick_time(call: CallbackQuery):
     data = temp.get(call.from_user.id)
 
     if not data:
-        await call.message.answer("Ошибка")
+        await call.message.answer("Ошибка", reply_markup=back_btn())
         return
 
     dt = f"{data['date']} {t}"
@@ -161,10 +204,27 @@ async def pick_time(call: CallbackQuery):
     )
     conn.commit()
 
-    await call.message.answer(f"✅ Создано занятие: {dt}")
+    await call.message.answer(
+        f"✅ Занятие создано:\n{dt}",
+        reply_markup=back_btn()
+    )
 
+# ---------------- STUDENTS LIST ----------------
+@dp.callback_query(F.data == "students")
+async def students(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return
 
-# ---------------- REMINDER SYSTEM ----------------
+    cursor.execute("SELECT name, user_id, role FROM users")
+    data = cursor.fetchall()
+
+    text = "👨‍🎓 Пользователи:\n\n"
+    for name, uid, role in data:
+        text += f"{name} | {role} | {uid}\n"
+
+    await call.message.answer(text, reply_markup=back_btn())
+
+# ---------------- REMINDERS ----------------
 async def reminder_loop():
     while True:
         now = datetime.now()
@@ -176,10 +236,13 @@ async def reminder_loop():
             try:
                 lesson_time = datetime.strptime(dt, "%Y-%m-%d %H:%M")
 
-                # за 2 часа
+                # 2 часа до
                 if lesson_time - timedelta(hours=2) <= now < lesson_time - timedelta(hours=1, minutes=59):
                     await bot.send_message(student_id, "⏰ Через 2 часа занятие")
 
+                # пропуск
+                if now > lesson_time + timedelta(minutes=15):
+                    await bot.send_message(student_id, "❌ Ты пропустил занятие")
 
             except:
                 pass
